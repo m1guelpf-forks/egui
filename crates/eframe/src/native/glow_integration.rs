@@ -886,7 +886,11 @@ impl GlowWinitRunning<'_> {
 
         integration.maybe_autosave(app.as_mut(), Some(&window));
 
-        sleep_if_invisible_or_minimized(Some(&window));
+        // An immediate viewport drawn in this pass waits for its own vsync if it's visible,
+        // so sleeping for its hidden parent would only slow it down.
+        if !draws_visible_immediate_viewport(&glutin.viewports, viewport_id) {
+            sleep_if_invisible_or_minimized(Some(&window));
+        }
 
         if integration.should_close() {
             Ok(EventResult::CloseRequested)
@@ -1587,6 +1591,20 @@ fn initialize_or_update_viewport(
             entry.into_mut()
         }
     }
+}
+
+/// Does this viewport's pass draw a visible immediate viewport (a child, or theirs)?
+fn draws_visible_immediate_viewport(
+    viewports: &OrderedViewportIdMap<Viewport>,
+    viewport_id: ViewportId,
+) -> bool {
+    viewports.values().any(|child| {
+        child.ids.parent == viewport_id
+            && child.ids.this != viewport_id // ROOT is its own parent.
+            && child.viewport_ui_cb.is_none()
+            && (child.info.visible().unwrap_or(true)
+                || draws_visible_immediate_viewport(viewports, child.ids.this))
+    })
 }
 
 /// Is this viewport, or any of its (transitive) descendant viewports, visible?

@@ -890,7 +890,11 @@ impl WgpuWinitRunning<'_> {
 
         integration.maybe_autosave(app.as_mut(), window.map(|w| w.as_ref()));
 
-        sleep_if_invisible_or_minimized(window.map(|window| window.as_ref()));
+        // An immediate viewport drawn in this pass waits for its own vsync if it's visible,
+        // so sleeping for its hidden parent would only slow it down.
+        if !draws_visible_immediate_viewport(viewports, viewport_id) {
+            sleep_if_invisible_or_minimized(window.map(|window| window.as_ref()));
+        }
 
         if integration.should_close() {
             Ok(EventResult::CloseRequested)
@@ -1135,6 +1139,17 @@ fn create_window(
     let window = egui_winit::create_window(egui_ctx, event_loop, &viewport_builder)?;
     epi_integration::apply_window_settings(&window, window_settings);
     Ok((window, viewport_builder))
+}
+
+/// Does this viewport's pass draw a visible immediate viewport (a child, or theirs)?
+fn draws_visible_immediate_viewport(viewports: &Viewports, viewport_id: ViewportId) -> bool {
+    viewports.values().any(|child| {
+        child.ids.parent == viewport_id
+            && child.ids.this != viewport_id // ROOT is its own parent.
+            && child.viewport_ui_cb.is_none()
+            && (child.info.visible().unwrap_or(true)
+                || draws_visible_immediate_viewport(viewports, child.ids.this))
+    })
 }
 
 /// Is this viewport, or any of its (transitive) descendant viewports, visible?
