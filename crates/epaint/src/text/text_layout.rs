@@ -184,7 +184,6 @@ struct ShapingContext {
     extra_letter_spacing: f32,
     section_index: u32,
     font_metrics: StyledMetrics,
-    is_first_glyph_in_section: bool,
     prev_cluster: Option<u32>,
 }
 
@@ -326,13 +325,10 @@ fn layout_shaped_run(
                     face_metrics,
                     text_byte_offset,
                 );
-            }
-            if !ctx.is_first_glyph_in_section {
-                paragraph.cursor_x_px += ctx.extra_letter_spacing * ctx.pixels_per_point;
+                space_after_cluster(ctx, paragraph);
             }
             cluster_start_byte = cluster as usize;
             cluster_glyph_count = 0;
-            ctx.is_first_glyph_in_section = false;
         }
         ctx.prev_cluster = Some(cluster);
 
@@ -427,6 +423,17 @@ fn layout_shaped_run(
             face_metrics,
             text_byte_offset,
         );
+        space_after_cluster(ctx, paragraph);
+    }
+}
+
+/// Puts [`TextFormat::extra_letter_spacing`] after the cluster just emitted,
+/// as CSS's `letter-spacing` does after each character, the last one
+/// included: the cluster's last glyph advances by it.
+fn space_after_cluster(ctx: &ShapingContext, paragraph: &mut Paragraph) {
+    paragraph.cursor_x_px += ctx.extra_letter_spacing * ctx.pixels_per_point;
+    if let Some(glyph) = paragraph.glyphs.last_mut() {
+        glyph.advance_width += ctx.extra_letter_spacing;
     }
 }
 
@@ -535,7 +542,6 @@ fn layout_section(
         extra_letter_spacing,
         section_index,
         font_metrics,
-        is_first_glyph_in_section: paragraph.glyphs.is_empty(),
         prev_cluster: None,
     };
     let mut runs = Vec::new();
@@ -548,7 +554,6 @@ fn layout_section(
         if 0 < seg_idx {
             paragraph = out_paragraphs.push_mut(Paragraph::from_section_index(section_index));
             paragraph.empty_paragraph_height = line_height;
-            ctx.is_first_glyph_in_section = true;
         }
 
         if segment.is_empty() {
@@ -594,12 +599,7 @@ fn layout_section(
             let glyph_buffer =
                 shape_text(font_face, run_text, format, shape_buffer, flags, direction);
             let first_glyph = paragraph.glyphs.len();
-            let cluster_start_px = paragraph.cursor_x_px
-                + if ctx.is_first_glyph_in_section {
-                    0.0
-                } else {
-                    ctx.extra_letter_spacing * pixels_per_point
-                };
+            let cluster_start_px = paragraph.cursor_x_px;
             layout_shaped_run(
                 font,
                 run,
@@ -621,6 +621,7 @@ fn layout_section(
                         advance_px,
                         pixels_per_point,
                     );
+                    space_after_cluster(&ctx, paragraph);
                 }
             }
 
@@ -957,7 +958,6 @@ fn replace_last_glyph_with_overflow_character(
     let mut overflow_cluster = row.glyphs.last().map(|glyph| glyph.cluster).unwrap_or(0);
     loop {
         let section = &job.sections[section_index as usize];
-        let extra_letter_spacing = section.format.extra_letter_spacing;
         let mut font = fonts.font(&section.format.font_id.family);
         let font_size = section.format.font_id.size;
 
@@ -971,7 +971,7 @@ fn replace_last_glyph_with_overflow_character(
         let mut font_face = font.fonts_by_id.get_mut(&font_id);
 
         let overflow_glyph_x = if let Some(prev_glyph) = row.glyphs.last() {
-            prev_glyph.max_x() + extra_letter_spacing
+            prev_glyph.max_x()
         } else {
             0.0 // TODO(emilk): heed paragraph leading_space 😬
         };
@@ -2147,6 +2147,33 @@ mod tests {
         assert!(
             unkerned > kerned + 0.5,
             "turning `kern` off spaces \"AV\" out: {kerned} -> {unkerned}"
+        );
+    }
+
+    #[test]
+    fn letter_spacing_follows_each_letter() {
+        let pixels_per_point = 1.0;
+        let mut fonts = FontsImpl::new(TextOptions::default(), FontDefinitions::default());
+        let mut spacing = |text: &str| {
+            let mut width = |extra_letter_spacing: f32| {
+                let format = TextFormat {
+                    font_id: FontId::proportional(14.0),
+                    extra_letter_spacing,
+                    ..Default::default()
+                };
+                let job = LayoutJob::single_section(text.into(), format);
+                layout(&mut fonts, pixels_per_point, job.into()).size().x
+            };
+            width(3.0) - width(0.0)
+        };
+        // As in CSS, the last letter is followed by the spacing too.
+        assert!((spacing("H") - 3.0).abs() < 1e-3, "{}", spacing("H"));
+        assert!((spacing("Hi!") - 9.0).abs() < 1e-3, "{}", spacing("Hi!"));
+        // A letter and its combining mark are one letter.
+        assert!(
+            (spacing("e\u{301}") - 3.0).abs() < 1e-3,
+            "{}",
+            spacing("e\u{301}")
         );
     }
 

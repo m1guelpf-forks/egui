@@ -520,7 +520,8 @@ impl AsRef<[(font_types::Tag, u32)]> for FontFeatures {
 pub struct TextFormat {
     pub font_id: FontId,
 
-    /// Extra spacing between letters, in points.
+    /// Extra spacing after each letter, in points, as CSS's `letter-spacing`:
+    /// the last letter of a section is followed by it too.
     ///
     /// Default: 0.0.
     pub extra_letter_spacing: f32,

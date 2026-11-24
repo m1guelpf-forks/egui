@@ -150,7 +150,7 @@ impl RichText {
         self
     }
 
-    /// Extra spacing between letters, in points.
+    /// Extra spacing after each letter, in points, as CSS's `letter-spacing`.
     ///
     /// Default: 0.0.
     ///
