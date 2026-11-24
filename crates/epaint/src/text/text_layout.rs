@@ -17,7 +17,7 @@ use crate::{
 
 use super::{
     ByteRangeExt as _, FontsImpl, Galley, Glyph, LayoutJob, LayoutSection, PlacedRow, Row,
-    RowVisuals, VariationCoords,
+    RowVisuals, TextFormat,
     font::{Font, FontFace, ShapedGlyph},
 };
 
@@ -591,14 +591,8 @@ fn layout_section(
             } else {
                 harfrust::Direction::LeftToRight
             };
-            let glyph_buffer = shape_text(
-                font_face,
-                run_text,
-                &format.coords,
-                shape_buffer,
-                flags,
-                direction,
-            );
+            let glyph_buffer =
+                shape_text(font_face, run_text, format, shape_buffer, flags, direction);
             let first_glyph = paragraph.glyphs.len();
             let cluster_start_px = paragraph.cursor_x_px
                 + if ctx.is_first_glyph_in_section {
@@ -1605,10 +1599,14 @@ fn segment_into_runs(
 /// The caller should iterate `glyph_infos()` / `glyph_positions()` (both
 /// `Copy` slices) and convert font units to pixels using `metrics.px_scale_factor`.
 /// After iteration, recycle the buffer via `glyph_buffer.clear()`.
+///
+/// The shaper is given the format's OpenType features and the font size, which
+/// AAT fonts (such as Apple's San Francisco) need to apply their size-specific
+/// tracking (`trak`).
 fn shape_text(
     font_face: &FontFace,
     text: &str,
-    coords: &VariationCoords,
+    format: &TextFormat,
     mut buffer: harfrust::UnicodeBuffer,
     flags: harfrust::BufferFlags,
     direction: harfrust::Direction,
@@ -1617,9 +1615,10 @@ fn shape_text(
     let tweak = font_face.tweak();
 
     // Build shaper with variable font instance if variation coordinates are set.
-    let variations: Vec<harfrust::Variation> = iter::chain(tweak.coords.as_ref(), coords.as_ref())
-        .map(|&(tag, value)| harfrust::Variation { tag, value })
-        .collect();
+    let variations: Vec<harfrust::Variation> =
+        iter::chain(tweak.coords.as_ref(), format.coords.as_ref())
+            .map(|&(tag, value)| harfrust::Variation { tag, value })
+            .collect();
 
     let instance = if variations.is_empty() {
         None
@@ -1640,7 +1639,16 @@ fn shape_text(
     buffer.guess_segment_properties();
     buffer.set_direction(direction);
 
-    shaper.shape(buffer, harfrust::ShapeOptions::new())
+    let features: Vec<harfrust::Feature> = format
+        .features
+        .as_ref()
+        .iter()
+        .map(|&(tag, value)| harfrust::Feature::new(tag, value, ..))
+        .collect();
+    let options = harfrust::ShapeOptions::new()
+        .features(&features)
+        .point_size(Some(format.font_id.size * tweak.scale));
+    shaper.shape(buffer, options)
 }
 
 // ----------------------------------------------------------------------------
@@ -2118,6 +2126,55 @@ mod tests {
                  than sum of individuals. pair_width={pair_w:.2}, sum={sum:.2}, \
                  kern_adjustment={kern_adjustment:.2} (should be > 0.5)",
             );
+        }
+    }
+
+    #[test]
+    fn features_reach_the_shaper() {
+        let pixels_per_point = 1.0;
+        let mut fonts = FontsImpl::new(TextOptions::default(), FontDefinitions::default());
+        let mut width = |features: FontFeatures| {
+            let format = TextFormat {
+                font_id: FontId::proportional(14.0),
+                features,
+                ..Default::default()
+            };
+            let job = LayoutJob::single_section("AV".into(), format);
+            layout(&mut fonts, pixels_per_point, job.into()).size().x
+        };
+        let kerned = width(FontFeatures::default());
+        let unkerned = width(FontFeatures::new([(b"kern", 0)]));
+        assert!(
+            unkerned > kerned + 0.5,
+            "turning `kern` off spaces \"AV\" out: {kerned} -> {unkerned}"
+        );
+    }
+
+    /// `Tracked.ttf` is a test font whose `trak` table spaces its square `A`
+    /// (half an em) by +0.1 em at 6pt, 0 at 12pt and -0.1 em at 24pt, the
+    /// way Apple's San Francisco tightens and loosens with size.
+    #[test]
+    fn aat_tracking_follows_the_font_size() {
+        let mut definitions = FontDefinitions::empty();
+        definitions.font_data.insert(
+            "Tracked".to_owned(),
+            std::sync::Arc::new(FontData::from_static(include_bytes!(
+                "../../tests/fonts/Tracked.ttf"
+            ))),
+        );
+        definitions
+            .families
+            .insert(FontFamily::Proportional, vec!["Tracked".to_owned()]);
+        let mut fonts = FontsImpl::new(TextOptions::default(), definitions);
+        for (size, em) in [(6.0, 0.6), (12.0, 0.5), (18.0, 0.45), (24.0, 0.4)] {
+            let (_, _, glyphs) = measure_text(&mut fonts, "AA", &FontId::proportional(size), 1.0);
+            for (_, advance) in glyphs {
+                assert!(
+                    (advance - em * size).abs() < 0.01,
+                    "at {size}pt each A advances {advance}, not {}",
+                    em * size
+                );
+            }
         }
     }
 

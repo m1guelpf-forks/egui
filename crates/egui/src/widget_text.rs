@@ -469,6 +469,7 @@ impl RichText {
                 color: text_color,
                 background: background_color,
                 coords,
+                features: Default::default(),
                 italics,
                 underline,
                 strikethrough,

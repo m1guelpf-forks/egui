@@ -472,6 +472,48 @@ impl core::hash::Hash for VariationCoords {
     }
 }
 
+/// OpenType features to turn on or off when shaping, by tag.
+///
+/// `1` turns a feature on, `0` turns it off, and features that choose between alternates take
+/// the alternate's number. If more than one value for a given feature is provided, the last one
+/// added is used. The font's default features (kerning, standard ligatures and so on) stay on
+/// unless turned off.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+pub struct FontFeatures(SmallVec<[(font_types::Tag, u32); 2]>);
+
+impl FontFeatures {
+    /// Create a list of features from a sequence of (tag, value) pairs.
+    ///
+    /// ## Example:
+    /// ```
+    /// use epaint::text::FontFeatures;
+    ///
+    /// // Tabular figures and the first stylistic set.
+    /// let features = FontFeatures::new([(b"tnum", 1), (b"ss01", 1)]);
+    /// ```
+    pub fn new<T: IntoTag>(values: impl IntoIterator<Item = (T, u32)>) -> Self {
+        Self(values.into_iter().map(|(t, v)| (t.into_tag(), v)).collect())
+    }
+
+    /// Add a feature to the list.
+    #[inline(always)]
+    pub fn push(&mut self, tag: impl IntoTag, value: u32) {
+        self.0.push((tag.into_tag(), value));
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+
+impl AsRef<[(font_types::Tag, u32)]> for FontFeatures {
+    #[inline(always)]
+    fn as_ref(&self) -> &[(font_types::Tag, u32)] {
+        &self.0
+    }
+}
+
 /// Formatting option for a section of text.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
@@ -504,6 +546,11 @@ pub struct TextFormat {
 
     pub coords: VariationCoords,
 
+    /// OpenType features to apply when shaping, on top of the font's defaults.
+    ///
+    /// Default: none.
+    pub features: FontFeatures,
+
     pub italics: bool,
 
     pub underline: Stroke,
@@ -533,6 +580,7 @@ impl Default for TextFormat {
             background: Color32::TRANSPARENT,
             expand_bg: 1.0,
             coords: VariationCoords::default(),
+            features: FontFeatures::default(),
             italics: false,
             underline: Stroke::NONE,
             strikethrough: Stroke::NONE,
@@ -552,6 +600,7 @@ impl core::hash::Hash for TextFormat {
             background,
             expand_bg,
             coords,
+            features,
             italics,
             underline,
             strikethrough,
@@ -566,6 +615,7 @@ impl core::hash::Hash for TextFormat {
         background.hash(state);
         emath::OrderedFloat(*expand_bg).hash(state);
         coords.hash(state);
+        features.hash(state);
         italics.hash(state);
         underline.hash(state);
         strikethrough.hash(state);
