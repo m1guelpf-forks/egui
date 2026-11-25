@@ -885,7 +885,7 @@ fn line_break(
                 let paragraph_max_x = glyphs
                     .iter()
                     .rev()
-                    .find(|glyph| job.keep_trailing_whitespace || !is_breaking_space(glyph.chr))
+                    .find(|glyph| !is_breaking_space(glyph.chr))
                     .map_or(0.0, Glyph::max_x);
 
                 out_rows.push(PlacedRow {
@@ -2211,16 +2211,18 @@ mod tests {
         let galley = layout(&mut fonts, pixels_per_point, job.clone().into());
         let rows: Vec<String> = galley.rows.iter().map(|row| row.text()).collect();
         assert_eq!(rows, ["Hello world ", "again"]);
-        assert!(
-            galley.rows[0].size.x <= wrap_width,
-            "the hanging space doesn't widen the row: {} > {wrap_width}",
-            galley.rows[0].size.x
-        );
 
-        // An editor sees its spaces.
-        job.keep_trailing_whitespace = true;
-        let galley = layout(&mut fonts, pixels_per_point, job.into());
-        assert!(galley.rows[0].size.x > wrap_width);
+        // Not even in an editor, which keeps its trailing whitespace for
+        // alignment: the hanging space doesn't widen the row.
+        for keep_trailing_whitespace in [false, true] {
+            job.keep_trailing_whitespace = keep_trailing_whitespace;
+            let galley = layout(&mut fonts, pixels_per_point, job.clone().into());
+            assert!(
+                galley.rows[0].size.x <= wrap_width,
+                "{} > {wrap_width}",
+                galley.rows[0].size.x
+            );
+        }
     }
 
     /// `Tracked.ttf` is a test font whose `trak` table spaces its square `A`
