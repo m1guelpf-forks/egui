@@ -846,7 +846,9 @@ fn line_break(
 
         let potential_row_width = paragraph.glyphs[i].max_x() - row_start_x;
 
-        if wrap_width < potential_row_width {
+        // Whitespace that would overflow hangs past the edge, as in CSS: the
+        // next word decides whether the row breaks, and breaks after it.
+        if wrap_width < potential_row_width && !is_breaking_space(paragraph.glyphs[i].chr) {
             // Row break:
 
             if first_row_indentation > 0.0
@@ -878,7 +880,13 @@ fn line_break(
                     .collect();
 
                 let section_index_at_start = glyphs[0].section_index;
-                let paragraph_max_x = glyphs.last().unwrap().max_x();
+                // The whitespace the row breaks after hangs: it doesn't make
+                // the row wider than the wrap width.
+                let paragraph_max_x = glyphs
+                    .iter()
+                    .rev()
+                    .find(|glyph| job.keep_trailing_whitespace || !is_breaking_space(glyph.chr))
+                    .map_or(0.0, Glyph::max_x);
 
                 out_rows.push(PlacedRow {
                     pos: pos2(0.0, f32::NAN),
@@ -1438,6 +1446,12 @@ fn add_row_hline(
 
 // ----------------------------------------------------------------------------
 
+/// Whitespace a row can break after: any but the no-break space.
+fn is_breaking_space(chr: char) -> bool {
+    const NON_BREAKING_SPACE: char = '\u{A0}';
+    chr.is_whitespace() && chr != NON_BREAKING_SPACE
+}
+
 /// Keeps track of good places to break a long row of text.
 /// Will focus primarily on spaces, secondarily on things like `-`
 #[derive(Clone, Copy, Default)]
@@ -1468,8 +1482,7 @@ struct RowBreakCandidates {
 impl RowBreakCandidates {
     fn add(&mut self, index: usize, glyphs: &[Glyph]) {
         let chr = glyphs[0].chr;
-        const NON_BREAKING_SPACE: char = '\u{A0}';
-        if chr.is_whitespace() && chr != NON_BREAKING_SPACE {
+        if is_breaking_space(chr) {
             self.space = Some(index);
         } else if is_cjk(chr) && (glyphs.len() == 1 || is_cjk_break_allowed(glyphs[1].chr)) {
             self.cjk = Some(index);
@@ -2175,6 +2188,39 @@ mod tests {
             "{}",
             spacing("e\u{301}")
         );
+    }
+
+    /// CSS hangs the space a row breaks after: a word that fits without the
+    /// space after it stays on its row.
+    #[test]
+    fn trailing_space_hangs_past_the_wrap_width() {
+        let pixels_per_point = 1.0;
+        let mut fonts = FontsImpl::new(TextOptions::default(), FontDefinitions::default());
+        let font_id = FontId::proportional(14.0);
+        let (fits, _, _) = measure_text(&mut fonts, "Hello world", &font_id, pixels_per_point);
+        let (with_space, _, _) =
+            measure_text(&mut fonts, "Hello world ", &font_id, pixels_per_point);
+        let wrap_width = f32::midpoint(fits, with_space);
+
+        let mut job = LayoutJob::simple(
+            "Hello world again".to_owned(),
+            font_id,
+            Color32::WHITE,
+            wrap_width,
+        );
+        let galley = layout(&mut fonts, pixels_per_point, job.clone().into());
+        let rows: Vec<String> = galley.rows.iter().map(|row| row.text()).collect();
+        assert_eq!(rows, ["Hello world ", "again"]);
+        assert!(
+            galley.rows[0].size.x <= wrap_width,
+            "the hanging space doesn't widen the row: {} > {wrap_width}",
+            galley.rows[0].size.x
+        );
+
+        // An editor sees its spaces.
+        job.keep_trailing_whitespace = true;
+        let galley = layout(&mut fonts, pixels_per_point, job.into());
+        assert!(galley.rows[0].size.x > wrap_width);
     }
 
     /// `Tracked.ttf` is a test font whose `trak` table spaces its square `A`
