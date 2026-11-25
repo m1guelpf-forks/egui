@@ -79,6 +79,10 @@ struct Paragraph {
 
     pub glyphs: Vec<Glyph>,
 
+    /// Where each of [`Self::glyphs`] starts before it's snapped to a pixel,
+    /// in points: wrapping measures these, as a browser does.
+    pub pen_x: Vec<f32>,
+
     /// In case of an empty paragraph ("\n"), use this as height.
     pub empty_paragraph_height: f32,
 }
@@ -89,6 +93,7 @@ impl Paragraph {
             cursor_x_px: 0.0,
             section_index_at_start,
             glyphs: vec![],
+            pen_x: vec![],
             empty_paragraph_height: 0.0,
         }
     }
@@ -332,6 +337,7 @@ fn layout_shaped_run(
         }
         ctx.prev_cluster = Some(cluster);
 
+        let pen_x = paragraph.cursor_x_px / ctx.pixels_per_point;
         let glyph = if glyph_id == skrifa::GlyphId::NOTDEF {
             // The shaper couldn't map this character. Drop combining marks
             // (Unicode category M) and duplicate NOTDEF glyphs within the same
@@ -409,6 +415,7 @@ fn layout_shaped_run(
             )
         };
         paragraph.glyphs.push(glyph);
+        paragraph.pen_x.push(pen_x);
         cluster_glyph_count += 1;
     }
 
@@ -496,6 +503,9 @@ fn emit_continuation_glyphs(
                 UvRect::default(),
                 (text_byte_offset + byte) as u32,
             ));
+            paragraph
+                .pen_x
+                .push(paragraph.cursor_x_px / ctx.pixels_per_point);
         }
         byte += chr.len_utf8();
     }
@@ -701,6 +711,9 @@ fn one_emoji_wide(
             glyph.uv_rect = UvRect::default();
         }
     }
+    for (index, pen_x) in paragraph.pen_x[first..].iter_mut().enumerate() {
+        *pen_x = if index == 0 { start_px } else { end_px } / pixels_per_point;
+    }
     paragraph.cursor_x_px = end_px;
 }
 
@@ -836,6 +849,10 @@ fn line_break(
 
     let mut first_row_indentation = paragraph.glyphs[0].pos.x;
     let mut row_start_x = 0.0;
+    // Where the row starts before glyphs are snapped to pixels: rows break
+    // where the real advances overflow, as in a browser, though glyphs are
+    // drawn on whole pixels.
+    let mut row_start_pen_x = 0.0;
     let mut row_start_idx = 0;
 
     for i in 0..paragraph.glyphs.len() {
@@ -844,7 +861,8 @@ fn line_break(
             break;
         }
 
-        let potential_row_width = paragraph.glyphs[i].max_x() - row_start_x;
+        let potential_row_width =
+            paragraph.pen_x[i] + paragraph.glyphs[i].advance_width - row_start_pen_x;
 
         // Whitespace that would overflow hangs past the edge, as in CSS: the
         // next word decides whether the row breaks, and breaks after it.
@@ -867,6 +885,7 @@ fn line_break(
                     ends_with_newline: false,
                 });
                 row_start_x += first_row_indentation;
+                row_start_pen_x += paragraph.pen_x[0];
                 first_row_indentation = 0.0;
             } else if let Some(last_kept_index) = row_break_candidates.get(job.wrap.break_anywhere)
             {
@@ -902,6 +921,7 @@ fn line_break(
                 // Start a new row:
                 row_start_idx = last_kept_index + 1;
                 row_start_x = paragraph.glyphs[row_start_idx].pos.x;
+                row_start_pen_x = paragraph.pen_x[row_start_idx];
                 row_break_candidates.forget_before_idx(row_start_idx);
             } else {
                 // Found no place to break, so we have to overrun wrap_width.
@@ -2223,6 +2243,44 @@ mod tests {
                 galley.rows[0].size.x
             );
         }
+    }
+
+    /// Rows break where the glyphs' real advances overflow, as a browser
+    /// breaks them, not where their pixel-snapped positions do.
+    #[test]
+    fn wrapping_measures_unsnapped_advances() {
+        let pixels_per_point = 1.0;
+        let mut fonts = FontsImpl::new(TextOptions::default(), FontDefinitions::default());
+        let line = |fonts: &mut FontsImpl, text: &str, size: f32, wrap_width: f32| {
+            let job = LayoutJob::simple(
+                text.to_owned(),
+                FontId::proportional(size),
+                Color32::WHITE,
+                wrap_width,
+            );
+            layout(fonts, pixels_per_point, job.into())
+        };
+        // A size at which snapping "aaa bbb" to pixels makes it measurably
+        // narrower than its advances. A paragraph that fits whole is measured
+        // by its advances.
+        let (size, snapped, advances) = (100..200)
+            .map(|tenths| tenths as f32 / 10.0)
+            .find_map(|size| {
+                let galley = line(&mut fonts, "aaa bbb", size, f32::INFINITY);
+                let row = &galley.rows[0];
+                let snapped = row.glyphs.last()?.max_x();
+                (row.size.x - snapped > 0.1).then_some((size, snapped, row.size.x))
+            })
+            .expect("a size whose pixel snapping narrows the line");
+
+        let wrap_width = f32::midpoint(snapped, advances);
+        let galley = line(&mut fonts, "aaa bbb ccc", size, wrap_width);
+        let rows: Vec<String> = galley.rows.iter().map(|row| row.text()).collect();
+        assert_eq!(
+            rows,
+            ["aaa ", "bbb ccc"],
+            "\"aaa bbb\" is {advances} wide, over {wrap_width}"
+        );
     }
 
     /// `Tracked.ttf` is a test font whose `trak` table spaces its square `A`
